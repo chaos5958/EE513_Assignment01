@@ -16,9 +16,9 @@
 #define WORKER_THREAD_NUM 4 
 
 //Client information 
-#define CLIENT_INFO_MAX 100000
-#define CLIENT_INFO_ARR_SIZE 10
-#define CLIENT_INFO_NUM (CLIENT_INFO_MAX / CLIENT_INFO_ARR_SIZE)
+#define KEY_INFO_MAX 100000
+#define KEY_INFO_ARR_SIZE 10
+#define KEY_INFO_NUM (KEY_INFO_MAX / KEY_INFO_ARR_SIZE)
 
 int enqueue_task(int, int);
 int dequeue_task(int);
@@ -26,8 +26,8 @@ void *worker_func(void *args);
 void initialize_lb(int, int *, pthread_t *);
 int handleCLI(char *cli_buf);
 int receiveMsg(char *msg, int connfd);
-int handleClient(int handler_idx, char *msg, int connfd);
-int handleHandler(char *msg);
+int handleLB(int handler_idx, char *msg, int connfd);
+int handlerWorker(char *msg);
 
 int byte_cnt = 0; /* counts total bytes received by server */
 pthread_cond_t *empty_arr; /* condition variable to wake up worker threads when input comes */
@@ -36,15 +36,18 @@ pthread_mutex_t *mutex_arr; /* mutext for prevent racing condition between the a
 pthread_mutex_t shared_mutex; /* mutex between worker threads */
 int *count_arr; /* managing how many number of tasks in the worker thread queue */
 int **accept_queue; /* worker threads's queue */
-int handler_fd[HANDLER_NUM];
-int client_num = CLIENT_INFO_NUM;
+int handler_fd[HANDLER_NUM - 1];
+int client_num = KEY_INFO_NUM;
+int lb_fd;
 host_info_t handlerinfo_arr[HANDLER_NUM];
-client_info_t **clientinfo_arr;
+host_info_t workerinfo_arr[WORKER_NUM];
+key_info_t ***keyinfo_arr;
+int miss_arr_len = KEY_INFO_NUM;
 
 int main(int argc, char **argv)
 {
     int param_opt;
-    bool is_thread = 0;
+    bool is_thread = 0, is_handler = 0;
     int listenfd, connfd, port, num_thread, i, enqueue_result; 
     int *ids;
     int worker_index = 0;
@@ -54,9 +57,13 @@ int main(int argc, char **argv)
     int ssn, ec;
     struct epoll_event event;
     struct epoll_event *events;
+    int handler_idx;
+    int conn_handler_num = 0; 
+    socklen_t clientlen = sizeof(struct sockaddr_in);
+    struct sockaddr_in clientaddr;
 
     //Process input arguments
-    while((param_opt = getopt(argc, argv, "t:")) != -1)
+    while((param_opt = getopt(argc, argv, "t:n:")) != -1)
     {
         switch(param_opt)
         {
@@ -64,10 +71,15 @@ int main(int argc, char **argv)
                 is_thread = true;
                 num_thread = atoi(optarg);
                 break;
+            
+            case 'n':
+                is_handler = true;
+                handler_idx = atoi(optarg);
+                break;
 
             default:
             {
-                fprintf(stderr, "usage: %s -t [thread_num] (t: optinal)\n", argv[0]);
+                fprintf(stderr, "usage: %s -n [handler_idx] -t [thread_num] (t: optinal)\n", argv[0]);
                 exit(1);
             }
         }
@@ -76,21 +88,54 @@ int main(int argc, char **argv)
     if(is_thread == 0)
         num_thread = WORKER_THREAD_NUM;
 
+    if(is_handler == 0)
+    {
+        fprintf(stderr, "usage: %s -t [thread_num] (t: optinal)\n", argv[0]);
+        exit(1);
+    }
+
     //Initialize several environment variables (most related to threads) 
     initialize_lb(num_thread, ids, pthread_arr);
+    getHandlersInfo(handlerinfo_arr);    
+    getWorkersInfo(workerinfo_arr);
 
     //Create a socket, then, bind and listen to a port 
-    listenfd = Open_listenfd(LB_PORT);
-    ssn = set_socket_nonblocking(listenfd);
-    if(ssn == -1)
-        abort();
+    listenfd = Open_listenfd(handlerinfo_arr[handler_idx].port);
 
-    //Connect to handlers 
-    getHandlersInfo(handlerinfo_arr);    
-    for (i = 0; i < HANDLER_NUM; i++) {
-        //TODO
-        //handler_fd[i] = Open_clientfd(handlerinfo_arr[i].ip, handlerinfo_arr[i].port);
+    //Connect to other handlers 
+    for (i = 0; i < handler_idx; i++) {
+        
+        while((handler_fd[conn_handler_num] = Open_clientfd(handlerinfo_arr[i].ip, handlerinfo_arr[i].port)) == -1); 
+        conn_handler_num++; ;
     }
+
+    
+
+    //Accept other handlers 
+    while(conn_handler_num < HANDLER_NUM - 1)
+    {
+        handler_fd[conn_handler_num] = accept(listenfd, (struct sockaddr*)&clientaddr, &clientlen); 
+
+        if(handler_fd[conn_handler_num] == -1)
+        {
+            perror("handler accepts other handelrs");
+            abort();
+        }
+
+        conn_handler_num++;
+    } 
+
+    printf("handler connection success\n");
+
+    lb_fd  = accept(listenfd, (struct sockaddr*)&clientaddr, &clientlen); 
+
+    if(lb_fd == -1)
+    {
+        perror("handler accepts a load balancer");
+        abort();
+    }
+
+    printf("handler-lb connection success\n");
 
     //Create an epoll instance
     epoll_fd = epoll_create1(0);
@@ -99,7 +144,13 @@ int main(int argc, char **argv)
         perror("epoll_create1(0)");
         abort();
     }
-    
+
+    //Set listen socket as non-blocking
+    ssn = set_socket_nonblocking(listenfd);
+    if(ssn == -1)
+        abort();
+
+
     //Register a listnen fd and STDIN
     event.data.fd = listenfd;
     event.events = EPOLLIN | EPOLLET;
@@ -141,8 +192,6 @@ int main(int argc, char **argv)
                 while(1)
                 {
                     int connfd;
-                    socklen_t clientlen = sizeof(struct sockaddr_in);
-                    struct sockaddr_in clientaddr;
                     char s[INET_ADDRSTRLEN];
 
                     connfd = accept(listenfd, (struct sockaddr*)&clientaddr, &clientlen); 
@@ -236,18 +285,17 @@ void *worker_func(void *args)
             /* Client request */
             if(hdr->code == 0)
             {
-                result = handleClient(handler_idx, msg, connfd);
+                result = handleLB(handler_idx, msg, connfd);
                 
                 if(result == -1)
                     continue;
 
                 handler_idx = (handler_idx + 1) % HANDLER_NUM;
-                handlerinfo_arr[handler_idx].request_num++;
             }
             /* Handler response */
             else
             {
-                result = handleHandler(msg);
+                result = handlerWorker(msg);
 
                 if(result == -1)
                     continue;
@@ -304,7 +352,7 @@ int dequeue_task(int index)
 
 void initialize_lb(int num_thread, int *ids, pthread_t *pthread_arr)
 {
-    int i;
+    int i, j;
 
     empty_arr = (pthread_cond_t *)malloc(num_thread * sizeof(pthread_cond_t));
     full_arr = (pthread_cond_t *)malloc(num_thread * sizeof(pthread_cond_t));
@@ -313,8 +361,16 @@ void initialize_lb(int num_thread, int *ids, pthread_t *pthread_arr)
     pthread_arr = (pthread_t *)malloc(num_thread * sizeof(pthread_t));
     ids = (int *)malloc(num_thread * sizeof(int));
     accept_queue = (int **)malloc(num_thread * sizeof(int *));
-    clientinfo_arr = (client_info_t **)malloc(CLIENT_INFO_ARR_SIZE * sizeof(client_info_t *));
-    clientinfo_arr[0] = (client_info_t *)malloc(CLIENT_INFO_NUM * sizeof(client_info_t));
+    keyinfo_arr = (key_info_t ***)malloc(WORKER_NUM * sizeof(key_info_t **));
+
+    for (i = 0; i < WORKER_NUM; i++) {
+        keyinfo_arr[i] = (key_info_t **)malloc(KEY_INFO_ARR_SIZE * sizeof(key_info_t*));
+        keyinfo_arr[i][0] = (key_info_t *)malloc(KEY_INFO_NUM * sizeof(key_info_t));
+        for (j = 0; j < KEY_INFO_NUM; j++) {
+            keyinfo_arr[i][0][j].cnt = 0;
+            keyinfo_arr[i][0][j].worker_idx = -1;
+        }
+    }
 
     for (i = 0; i < num_thread; i++) {
         ids[i] = i;
@@ -326,9 +382,9 @@ void initialize_lb(int num_thread, int *ids, pthread_t *pthread_arr)
     }
     pthread_mutex_init(&shared_mutex, NULL);
 
-    for (i = 0; i < CLIENT_INFO_NUM; i++) {
-        clientinfo_arr[0][i].is_live = false;
-        pthread_mutex_init(&clientinfo_arr[0][i].mutex, NULL);
+    for (i = 0; i < KEY_INFO_NUM; i++) {
+        keyinfo_arr[0][i].worker_idx = -1;
+        cnt = 0;
     }
 
     //creating worker threadds
@@ -395,89 +451,156 @@ int receiveMsg(char * msg, int connfd)
     return 0;
 }
 
-int handleClient(int handler_idx, char *msg, int connfd)
+int handleLB(int handler_idx, char *msg, int connfd)
 {
-    int i, j, k, lock;
+    int i, j, lock, hash_value, connfd;
     bool is_success = false;
     data_hdr_t *hdr = (data_hdr_t *)msg;
 
-    for (i = 0; i < CLIENT_INFO_ARR_SIZE; i++) {
-        //Expand an array which holds client information
-        while(clientinfo_arr[i] == NULL)
-        {
-            pthread_mutex_lock(&shared_mutex);
-            clientinfo_arr[i] = (client_info_t *)malloc(CLIENT_INFO_NUM * sizeof(client_info_t));
-            for (k = 0; k < CLIENT_INFO_NUM; k++) {
-                pthread_mutex_init(&clientinfo_arr[i][k].mutex, NULL);
-                clientinfo_arr[i][k].is_live = false; 
-            }
-            pthread_mutex_unlock(&shared_mutex);
-        }
+    hash_value = jenkins_one_at_a_time_hash(msg + sizeof(data_hdr_t), &hdr->key_len);
 
-        for (j = 0; j < CLIENT_INFO_NUM; j++) {
-            if(!clientinfo_arr[i][j].is_live) 
-            {
-                lock = pthread_mutex_trylock(&clientinfo_arr[i][j].mutex);
-                if(lock == 0)
-                {
-                    clientinfo_arr[i][j].id = hdr->client_id;
-                    clientinfo_arr[i][j].fd = connfd;
-                    clientinfo_arr[i][j].is_live = true;
-                    is_success = true;
-                    goto double_for_exit;
-                }
-            }    
-        }
-
-    }
-
-double_for_exit:
-
-    if(!is_success)
+    //check keyinfo_arr
+    connfd = Open_clientfd(workerinfo_arr[hash_value % WORKER_NUM].ip, workerinfo_arr[hash_value % WORKER_NUM].port); 
+    if(connfd == -1)
     {
-        fprintf(stderr, "client information array is full\n"); 
+        perror("connect to worker");
         return -1;
     }
-
-    if(send(handler_fd[handler_idx], msg, sizeof(data_hdr_t) + hdr->key_len + hdr->value_len, 0) == -1)
-    {
-        perror("[LB] send to client error");
-        return -1;
-    }
-
+    
     return 0;
 }
 
-int handleHandler(char *msg)
+int handlerWorker(char *msg)
 {
     //Find a client which id is 'id'
-    int i, j, k, lock, client_fd = -1;
+    int i, j, k, lock, client_fd = -1, hash_value;
     data_hdr_t *hdr = (data_hdr_t *)msg;
     bool is_success = false;
-
-    for (i = 0; i < CLIENT_INFO_ARR_SIZE; i++) {
-        if(clientinfo_arr[i] == NULL)
-        {
-            fprintf(stderr, "client fd disappear\n");
-            return -1;
-        }
-        for (j = 0; j < CLIENT_INFO_NUM; j++) {
-            if(clientinfo_arr[i][j].is_live && (hdr->client_id == clientinfo_arr[i][j].id)) 
-            {
-                client_fd = clientinfo_arr[i][j].fd; 
-                clientinfo_arr[i][j].is_live = false;
-                break;
-            }    
-        }
-    }
+    sync_packet_t *sync_packet = (sync_packet_t *)malloc(sizeof(sync_packet_t));
 
     //Send a message to a client
-    if(send(client_fd, msg, sizeof(data_hdr_t) + hdr->key_len + hdr->value_len, MSG_NOSIGNAL) == -1)
+    if(send(lb_fd, msg, sizeof(data_hdr_t) + hdr->key_len + hdr->value_len, 0) == -1)
     {
         perror("[LB] send to client error");
         return -1;
     }
 
+    hash_value = jenkins_one_at_a_time_hash(msg + sizeof(data_hdr_t), &hdr->key_len);
+
+    //Synchronize handlers
+    if(hdr->cmd == PUT_ACK && hdr->code == SUCCESS)
+    {
+        updateKey(hash_value, PUT); 
+
+        sync_packet->key_hash = hash_value;
+        sync_packet->key_hash = PUT;
+        
+        for (i = 0; i < HANDLER_NUM - 1; i++) {
+            if(send(handler_fd[i], sync_packet, sizeof(sync_packet_t), 0) == -1)
+            {
+                perror("Handler sends to otherr handlers");
+                return -1;
+            }
+        }
+    }
+    else if(hdr->cmd = DEL_ACK && hdr->code == SUCCESS)
+    {
+        updateKey(hash_value, DEL);
+
+        sync_packet->key_hash = hash_value;
+        sync_packet->key_hash = DEL:;
+
+        for (i = 0; i < HANDLER_NUM - 1; i++) {
+            if(send(handler_fd[i], sync_packet, sizeof(sync_packet_t), 0) == -1)
+            {
+                perror("Handler sends to otherr handlers");
+                return -1;
+            }
+        }
+    }
     return 0;
+}
+
+int updateKey(int hash_value, int status)
+{
+    int i, j, k;
+    int i_, j_, value;
+    int worker_idx = hash_value % 5;
+    
+    if(status != PUT && status != DEL)
+    {
+        fprintf(stderr, "wrong status\n");
+        return -1;
+    }
+
+    pthread_mutex_lock(&shared_mutex);
+
+    value = findKey(hash_value);
+    if(value != -1)
+    {
+        i_ = value / KEY_INFO_NUM;
+        j_ = value % KEY_INFO_NUM;
+
+        if(status == PUT)
+            keyinfo_arr[i_][j_].cnt++;
+        else if(status == DEL)
+            keyinfo_arr[i_][j_].cnt--;
+
+        if(keyinfo_arr[i_][j_].cnt == 0)
+            keyinfo_arr[i_][j_].worker_idx = -1;
+        pthread_mutex_unlock(&shared_mutex);
+        return 0;
+    }
+
+    //Update a key information array
+    for (i = 0; i < KEY_INFO_ARR_SIZE; i++) {
+        //Expand an array which holds client information
+        if(keyinfo_arr[worker_idx][i] == NULL)
+        {
+            keyinfo_arr[worker_idx][i] = (key_info_t *)malloc(KEY_INFO_NUM * sizeof(key_info_t));
+            for (k = 0; k < KEY_INFO_NUM; k++) {
+                keyinfo_arr[worker_idx][i][k].worker_idx = -1; 
+                keyinfo_arr[worker_idx][i][k].cnt = 0;
+            }
+        }
+
+        for (j = 0; j < KEY_INFO_NUM; j++) {
+            if(!keyinfo_arr[worker_idx][i][j].worker_idx == -1) 
+            {
+                keyinfo_arr[worker_idx][i][j].key_hash = hash_value;
+                keyinfo_arr[worker_idx][i][j].worker_idx = hash_value % WORKER_NUM;
+                if(status == PUT)
+                    keyinfo_arr[worker_idx][i][0].cnt = 1;
+                else if(status == DEL)
+                    keyinfo_arr[worker_idx][i][0].cnt = -1;
+
+                pthread_mutex_unlock(&shared_mutex);
+                return 0;
+            }    
+        }
+
+    }
+    pthread_mutex_unlock(&shared_mutex);
+    return -1;
+}
+
+int findKey(int hash_value)
+{
+    int i, j;
+    int worker_idx = hash_value % 5;
+
+    for (i = 0; i < KEY_INFO_ARR_SIZE; i++) {
+        if(keyinfo_arr[worker_idx][i] == NULL)
+            return -1;
+
+        for (j = 0; j < KEY_INFO_NUM; j++) {
+            if((!keyinfo_arr[worker_idx][i][j].worker_idx != -1) && (keyinfo_arr[worker_idx][i][j].key_hash == hash_value)) 
+            {
+                return i * KEY_INFO_NUM + j;
+            }    
+        }
+    }
+
+    return -1;
 }
 

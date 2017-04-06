@@ -125,6 +125,7 @@ int main(int argc, char *argv[])
             connfd = Open_clientfd(ip, LB_PORT);
             break;
 
+            //TODO put 1 segmentation fault
             case PUT_CLI:
             hdr->cmd = 1;
             hdr->code = 0;

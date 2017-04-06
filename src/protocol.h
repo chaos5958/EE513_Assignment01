@@ -58,6 +58,12 @@ typedef struct _client_info_t{
     pthread_mutex_t mutex; 
 } client_info_t;
 
+typedef struct _key_info_t{
+    uint32_t key_hash;
+    int worker_idx;
+    int cnt;
+} key_info_t;
+
 typedef struct _data_hdr_t{
     uint32_t client_id;
     uint32_t transaction_id;
@@ -66,6 +72,11 @@ typedef struct _data_hdr_t{
     uint16_t key_len;
     uint16_t value_len;
 } data_hdr_t;
+
+typedef struct _sync_packet_t{
+    uint32_t key_hash;
+    int action;
+} sync_packet_t;
 
 static void getHandlersInfo(host_info_t hinfo[])
 {
