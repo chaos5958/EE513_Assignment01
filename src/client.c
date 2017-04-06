@@ -10,6 +10,7 @@
 #include <arpa/inet.h>
 #include "protocol.h" 
 #include "csapp.h"
+#include "network.h"
 
 #define MAXDATASIZE 100
 #define CLI_BUF_SIZE 50
@@ -216,11 +217,7 @@ int main(int argc, char *argv[])
     }
 }
 
-void checkLineSeparator(char *buf)
-{
-    if(buf[strlen(buf) - 1] == '\n')
-        buf[strlen(buf) - 1] = '\0';
-}
+
  
             
 

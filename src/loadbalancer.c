@@ -88,9 +88,12 @@ int main(int argc, char **argv)
     //Connect to handlers 
     getHandlersInfo(handlerinfo_arr);    
     for (i = 0; i < HANDLER_NUM; i++) {
-        //TODO
-        //handler_fd[i] = Open_clientfd(handlerinfo_arr[i].ip, handlerinfo_arr[i].port);
+    //for(i = 0; i < 1; i++){
+        //TODO: 3connection
+        handler_fd[i] = Open_clientfd(handlerinfo_arr[i].ip, handlerinfo_arr[i].port);
     }
+
+    printf("lb handler connection success\n");
 
     //Create an epoll instance
     epoll_fd = epoll_create1(0);
@@ -237,12 +240,13 @@ void *worker_func(void *args)
             if(hdr->code == 0)
             {
                 result = handleClient(handler_idx, msg, connfd);
+                printf("handleclient result = %d\n", result);
                 
                 if(result == -1)
                     continue;
 
-                handler_idx = (handler_idx + 1) % HANDLER_NUM;
                 handlerinfo_arr[handler_idx].request_num++;
+                handler_idx = (handler_idx + 1) % HANDLER_NUM;
             }
             /* Handler response */
             else
@@ -352,7 +356,7 @@ int handleCLI(char *cli_buf)
     if(strcmp(cli_buf, "list\n") == 0)
     { 
         for (i = 0; i < HANDLER_NUM; i++)
-            fprintf(stdout, "%d/%s/%d\n", i, handlerinfo_arr[i].ip, handlerinfo_arr[i].port); 
+            fprintf(stdout, "%d/%s/%d/%d\n", i, handlerinfo_arr[i].ip, handlerinfo_arr[i].port, handlerinfo_arr[i].request_num); 
     }
     else
     {

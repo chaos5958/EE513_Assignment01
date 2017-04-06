@@ -1,10 +1,13 @@
-all: loadbalancer handler loadbalancer.o client csapp.o client.o
+all: loadbalancer handler worker client  
 
 loadbalancer : loadbalancer.o csapp.o 
 	gcc -o loadbalancer loadbalancer.o csapp.o -lpthread
 
 handler: handler.o csapp.o
 	gcc -o handler handler.o csapp.o -lpthread
+
+worker: worker.o csapp.o
+	gcc -o worker worker.o csapp.o -lpthread
 
 client: client.o csapp.o
 	gcc -o client client.o csapp.o -lpthread
@@ -17,6 +20,9 @@ handler.o: handler.c
 
 client.o: client.c
 	gcc -c client.c
+
+worker.o: worker.c
+	gcc -c worker.c
 
 csapp.o: csapp.c
 	gcc -c csapp.c

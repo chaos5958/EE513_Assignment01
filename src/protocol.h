@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <stdbool.h>
+#include <stdio.h>
 #ifndef __PROTOCOL_H__
 #define __PROTOCOL_H__
 
@@ -40,8 +41,8 @@
 #define LB_PORT 5131
 
 #define MAX_BUF_SIZE 8
-#define KEY_MAX 4
-#define VALUE_MAX 16
+#define KEY_MAX 32
+#define VALUE_MAX 128 
 
 #define CLI_BUF_SIZE 50 
 
@@ -75,8 +76,14 @@ typedef struct _data_hdr_t{
 
 typedef struct _sync_packet_t{
     uint32_t key_hash;
-    int action;
+    uint16_t action;
 } sync_packet_t;
+
+typedef struct _worker_data_t{
+    char key[KEY_MAX];
+    char value[VALUE_MAX];
+    bool is_live;
+} worker_data_t;
 
 static void getHandlersInfo(host_info_t hinfo[])
 {
@@ -119,6 +126,7 @@ static void getWorkersInfo(host_info_t hinfo[])
     hinfo[4].port = WORKER_05_PORT; 
     hinfo[4].request_num = 0;
 
+    printf("port %d\n", hinfo[0].port);
 }
 
 uint32_t jenkins_one_at_a_time_hash(const uint8_t* key, size_t length) {
