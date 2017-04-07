@@ -7,7 +7,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-static int set_socket_nonblocking(int fd)
+int set_socket_nonblocking(int fd)
 {
     int flag, s; 
 
@@ -29,7 +29,7 @@ static int set_socket_nonblocking(int fd)
     return 0;
 }
 
-static void checkLineSeparator(char *buf)
+void checkLineSeparator(char *buf)
 {
     if(buf[strlen(buf) - 1] == '\n')
         buf[strlen(buf) - 1] = '\0';

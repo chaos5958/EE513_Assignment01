@@ -32,7 +32,7 @@ int handlelist(char *);
 int receiveHandlerMsg(char *, int);
 int findKey(char *);
 int handlePUT(char *);
-int handleGET(char *);
+int handleGET(char *, char *);
 int handleDEL(char *);
 
 int byte_cnt = 0; /* counts total bytes received by server */
@@ -246,6 +246,7 @@ void *worker_func(void *args)
         //Handle a worker response
         else
         {
+            memset(msg, 0, sizeof(msg));
             result = receiveMsg(msg, connfd);
 
             if(result == -1)
@@ -329,6 +330,8 @@ void initialize_worker(int num_thread, int *ids, pthread_t *pthread_arr)
     workerdata_arr[0] = (worker_data_t *)malloc(WORKER_INFO_NUM * sizeof(worker_data_t));
     for (j = 0; j < WORKER_INFO_NUM; j++) {
         workerdata_arr[0][j].is_live = false;
+        memset(workerdata_arr[0][j].key, 0, sizeof(workerdata_arr[0][j].key));
+        memset(workerdata_arr[0][j].value, 0, sizeof(workerdata_arr[0][j].value));
     }
 
 
@@ -466,6 +469,8 @@ int receiveMsg(char * msg, int connfd)
         }
     }
 
+    printf("value len: %d value : %s\n", hdr->value_len, msg + sizeof(data_hdr_t) + hdr->key_len);
+
     return 0;
 }
 
@@ -491,7 +496,8 @@ int handleHandlerReq(char *msg, int connfd)
     int result;
     bool is_success = false;
     data_hdr_t *hdr = (data_hdr_t *)msg;
-    
+    char send_msg[sizeof(data_hdr_t) + KEY_MAX + VALUE_MAX];
+
     if(hdr->cmd == PUT)
     {
         result = handlePUT(msg);     
@@ -499,51 +505,67 @@ int handleHandlerReq(char *msg, int connfd)
         {
             hdr->cmd = PUT_ACK;
             hdr->code = ALREADY_EXIST;
+            printf("put fail\n");
         }
         else
         {
             hdr->cmd = PUT_ACK;
             hdr->code = SUCCESS;
+            printf("put sucess\n");
         }
     }
     else if(hdr->cmd == GET)
     {
-        result = handleGET(msg);     
+        result = handleGET(msg, send_msg);     
         if(result == -1)
         {
             hdr->cmd = GET_ACK;
             hdr->code = NOT_EXIST;
+            printf("get fail\n");
         }
         else
         {
+            hdr = (data_hdr_t *)send_msg;
             hdr->cmd = GET_ACK;
             hdr->code = SUCCESS;
+            printf("get success\n");
         }
     }
     else if(hdr->cmd == DEL)
     {
         result = handleDEL(msg);     
-        hdr = (data_hdr_t *)msg;
         if(result == -1)
         {
             hdr->cmd = DEL_ACK;
             hdr->code = NOT_EXIST;
+            printf("del fail\n");
         }
         else
         {
             hdr->cmd = DEL_ACK;
             hdr->code = SUCCESS;
+            printf("del sucess\n");
         }
 
     }
 
     printf("worker send %d\n", sizeof(data_hdr_t) + hdr->key_len + hdr->value_len);
-    if(send(connfd, msg, sizeof(data_hdr_t) + hdr->key_len + hdr->value_len, 0) == -1)
+    if(hdr->cmd == GET_ACK && hdr->code == SUCCESS)
     {
-        perror("worker send to handler");
-        return -1;
+        if(send(connfd, send_msg, sizeof(data_hdr_t) + hdr->key_len + hdr->value_len, 0) == -1)
+        {
+            perror("worker send to handler");
+            return -1;
+        }
     }
-
+    else
+    {
+        if(send(connfd, msg, sizeof(data_hdr_t) + hdr->key_len + hdr->value_len, 0) == -1)
+        {
+            perror("worker send to handler");
+            return -1;
+        }
+    }
     close(connfd);
 
     return 0;
@@ -578,6 +600,8 @@ int handlePUT(char *msg)
             workerdata_arr[i] = (worker_data_t *)malloc(WORKER_INFO_NUM * sizeof(worker_data_t));
             for (k = 0; k < WORKER_INFO_NUM; k++) {
                 workerdata_arr[i][k].is_live= false; 
+                memset(workerdata_arr[0][j].key, 0, sizeof(workerdata_arr[0][j].key));
+                memset(workerdata_arr[0][j].value, 0, sizeof(workerdata_arr[0][j].value));
             }
         }
 
@@ -624,19 +648,31 @@ int handleDEL(char *msg)
         j = result % WORKER_INFO_NUM;
 
         workerdata_arr[i][j].is_live = false;
+        memset(workerdata_arr[0][j].key, 0, sizeof(workerdata_arr[0][j].key));
+        memset(workerdata_arr[0][j].value, 0, sizeof(workerdata_arr[0][j].value));
+
+
+
     }
 
     pthread_mutex_unlock(&shared_mutex);
     return 0;
 }
 
-int handleGET(char *msg)
+int handleGET(char *msg, char *send_msg)
 {
     int i, j;
-    data_hdr_t *hdr = (data_hdr_t *)msg;
+    data_hdr_t *hdr_ori;
+    data_hdr_t *hdr;
     char *key = msg + sizeof(data_hdr_t);
-    uint32_t hash_value = jenkins_one_at_a_time_hash(key, hdr->key_len); 
-    int worker_idx = hash_value % 5;
+
+    memset(send_msg, 0, sizeof(send_msg));
+    hdr_ori = (data_hdr_t *)msg;
+    hdr = (data_hdr_t *)send_msg;
+
+    hdr->client_id = hdr_ori->client_id;
+    hdr->transaction_id = hdr_ori->transaction_id;
+
     pthread_mutex_lock(&shared_mutex);
     for (i = 0; i < WORKER_INFO_ARR_SIZE; i++) {
         if(workerdata_arr[i] == NULL)
@@ -648,14 +684,11 @@ int handleGET(char *msg)
         for (j = 0; j < WORKER_INFO_NUM; j++) {
             if((workerdata_arr[i][j].is_live) && (strcmp(key, workerdata_arr[i][j].key) == 0))
             {
-                msg = realloc(msg, sizeof(data_hdr_t) + strlen(workerdata_arr[i][j].key) + strlen(workerdata_arr[i][j].key));
-                hdr = (data_hdr_t *)msg;
-
                 hdr->key_len = strlen(workerdata_arr[i][j].key);
                 hdr->value_len = strlen(workerdata_arr[i][j].value);
   
-                memcpy(msg + sizeof(data_hdr_t), workerdata_arr[i][j].key, hdr->key_len);
-                memcpy(msg + sizeof(data_hdr_t) + hdr->key_len, workerdata_arr[i][j].value, hdr->value_len);
+                memcpy(send_msg + sizeof(data_hdr_t), workerdata_arr[i][j].key, hdr->key_len);
+                memcpy(send_msg + sizeof(data_hdr_t) + hdr->key_len, workerdata_arr[i][j].value, hdr->value_len);
                 printf("handleGET %s, %s\n", workerdata_arr[i][j].key, workerdata_arr[i][j].value);
 
                 pthread_mutex_unlock(&shared_mutex);

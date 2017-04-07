@@ -85,16 +85,6 @@ int main(int argc, char **argv)
     if(ssn == -1)
         abort();
 
-    //Connect to handlers 
-    getHandlersInfo(handlerinfo_arr);    
-    for (i = 0; i < HANDLER_NUM; i++) {
-    //for(i = 0; i < 1; i++){
-        //TODO: 3connection
-        handler_fd[i] = Open_clientfd(handlerinfo_arr[i].ip, handlerinfo_arr[i].port);
-    }
-
-    printf("lb handler connection success\n");
-
     //Create an epoll instance
     epoll_fd = epoll_create1(0);
     if(epoll_fd == -1)
@@ -102,8 +92,22 @@ int main(int argc, char **argv)
         perror("epoll_create1(0)");
         abort();
     }
-    
-    //Register a listnen fd and STDIN
+
+    //Connect to handlers 
+    getHandlersInfo(handlerinfo_arr);    
+    for (i = 0; i < HANDLER_NUM; i++) {
+    //for(i = 0; i < 1; i++){
+        //TODO: 3connection
+        handler_fd[i] = Open_clientfd(handlerinfo_arr[i].ip, handlerinfo_arr[i].port);
+
+        event.data.fd = handler_fd[i];
+        event.events = EPOLLIN | EPOLLET;
+        ec = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, handler_fd[i], &event);
+    }
+
+    printf("lb handler connection success\n");
+
+        //Register a listnen fd and STDIN
     event.data.fd = listenfd;
     event.events = EPOLLIN | EPOLLET;
     ec = epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listenfd, &event);
@@ -120,7 +124,7 @@ int main(int argc, char **argv)
     
     while(1)
     {
-        int event_num, i;
+        int event_num, i, j;
         event_num = epoll_wait(epoll_fd, events, MAX_EVENT_NUM, -1);
         //printf("epoll event_num: %d\n", event_num);
 
@@ -134,6 +138,18 @@ int main(int argc, char **argv)
             }
             else if(events[i].events & EPOLLRDHUP)
             {
+                for (i = 0; i < CLIENT_INFO_ARR_SIZE; i++) {
+                    if(clientinfo_arr[i] != NULL)
+                    {
+                        for (j = 0; j < CLIENT_INFO_NUM; j++) {
+                            if(clientinfo_arr[i][j].is_live && (events[i].data.fd == clientinfo_arr[i][j].fd)) 
+                            {
+                                clientinfo_arr[i][j].is_live = false;
+                            }    
+                        }
+                    }
+                }
+
                 close(events[i].data.fd);
                 printf("client_close\n");
                 continue;
@@ -405,6 +421,7 @@ int handleClient(int handler_idx, char *msg, int connfd)
     bool is_success = false;
     data_hdr_t *hdr = (data_hdr_t *)msg;
 
+    printf("handlerClient is called\n");
     for (i = 0; i < CLIENT_INFO_ARR_SIZE; i++) {
         //Expand an array which holds client information
         while(clientinfo_arr[i] == NULL)
@@ -421,6 +438,7 @@ int handleClient(int handler_idx, char *msg, int connfd)
         for (j = 0; j < CLIENT_INFO_NUM; j++) {
             if(!clientinfo_arr[i][j].is_live) 
             {
+                printf("befor lock acquire\n");
                 lock = pthread_mutex_trylock(&clientinfo_arr[i][j].mutex);
                 if(lock == 0)
                 {
@@ -428,6 +446,9 @@ int handleClient(int handler_idx, char *msg, int connfd)
                     clientinfo_arr[i][j].fd = connfd;
                     clientinfo_arr[i][j].is_live = true;
                     is_success = true;
+                    printf("loadbalancer client register\n");
+                    lock = pthread_mutex_unlock(&clientinfo_arr[i][j].mutex);
+
                     goto double_for_exit;
                 }
             }    
@@ -459,6 +480,7 @@ int handleHandler(char *msg)
     data_hdr_t *hdr = (data_hdr_t *)msg;
     bool is_success = false;
 
+    printf("hdr->client_id %d\n", hdr->client_id);
     for (i = 0; i < CLIENT_INFO_ARR_SIZE; i++) {
         if(clientinfo_arr[i] == NULL)
         {
@@ -469,18 +491,20 @@ int handleHandler(char *msg)
             if(clientinfo_arr[i][j].is_live && (hdr->client_id == clientinfo_arr[i][j].id)) 
             {
                 client_fd = clientinfo_arr[i][j].fd; 
-                clientinfo_arr[i][j].is_live = false;
-                break;
+                goto double_for_exit;
             }    
         }
     }
 
+double_for_exit:
     //Send a message to a client
     if(send(client_fd, msg, sizeof(data_hdr_t) + hdr->key_len + hdr->value_len, MSG_NOSIGNAL) == -1)
     {
         perror("[LB] send to client error");
         return -1;
     }
+
+    printf("send to a client\n");
 
     return 0;
 }

@@ -562,11 +562,82 @@ int receiveHandlerMsg(char * msg, int connfd)
 int handleLB(char *msg)
 {
     int i, j, lock;
-    bool is_success = false;
+    bool is_success = false, is_exist = false;
     struct epoll_event event;
     data_hdr_t *hdr = (data_hdr_t *)msg;
 
     uint32_t hash_value = jenkins_one_at_a_time_hash(msg + sizeof(data_hdr_t), hdr->key_len);
+
+    //TODO
+    pthread_mutex_lock(&shared_mutex);
+    int worker_idx = hash_value % 5;
+
+    for (i = 0; i < KEY_INFO_ARR_SIZE; i++) {
+        if(keyinfo_arr[worker_idx][i] != NULL)
+        {
+            for (j = 0; j < KEY_INFO_NUM; j++) {
+                if((keyinfo_arr[worker_idx][i][j].worker_idx != -1) && (keyinfo_arr[worker_idx][i][j].key_hash == hash_value)) 
+                {
+                    is_exist =  true;
+                    goto double_for_exit;
+                }    
+            }
+        }
+    }
+
+double_for_exit:
+    pthread_mutex_unlock(&shared_mutex);
+
+
+    if(!is_exist)
+    {
+        if(hdr->cmd == GET)
+        {
+            hdr->cmd = GET_ACK;
+            hdr->code = NOT_EXIST;
+            hdr->key_len = 0;
+            hdr->value_len = 0;
+            
+            if(send(lb_fd, msg, sizeof(data_hdr_t) + hdr->key_len + hdr->value_len, 0) == -1)
+            {
+                perror("Handler sends to lb");
+                return -1;
+            }
+            return 0;
+        }
+        else if(hdr->cmd == DEL)
+        {
+            hdr->cmd = DEL_ACK;
+            hdr->code = NOT_EXIST;
+            hdr->key_len = 0;
+            hdr->value_len = 0;
+
+            if(send(lb_fd, msg, sizeof(data_hdr_t) + hdr->key_len + hdr->value_len, 0) == -1)
+            {
+                perror("Handler sends to lb");
+                return -1;
+            }
+            printf("del send\n");
+            return 0;
+        }
+    }
+    else
+    {
+        if(hdr->cmd == PUT)
+        {
+            hdr->cmd = PUT_ACK;
+            hdr->code = ALREADY_EXIST;
+            hdr->key_len = 0;
+            hdr->value_len = 0;
+            if(send(lb_fd, msg, sizeof(data_hdr_t) + hdr->key_len + hdr->value_len, 0) == -1)
+            {
+                perror("Handler sends to lb");
+                return -1;
+            }
+            return 0;
+        }
+    }
+
 
     int connfd = Open_clientfd(workerinfo_arr[hash_value % WORKER_NUM].ip, workerinfo_arr[hash_value % WORKER_NUM].port); 
 
@@ -596,13 +667,6 @@ int handleWorker(char *msg)
     data_hdr_t *hdr = (data_hdr_t *)msg;
     bool is_success = false;
     sync_packet_t *sync_packet = (sync_packet_t *)malloc(sizeof(sync_packet_t));
-
-    //Send a message to a client
-    if(send(lb_fd, msg, sizeof(data_hdr_t) + hdr->key_len + hdr->value_len, 0) == -1)
-    {
-        perror("[LB] send to client error");
-        return -1;
-    }
 
     hash_value = jenkins_one_at_a_time_hash(msg + sizeof(data_hdr_t), hdr->key_len);
     printf("hdr->keylen %d, hash %d\n", hdr->key_len, hash_value);
@@ -641,6 +705,21 @@ int handleWorker(char *msg)
         }
     }
 
+    if(hdr->cmd != GET_ACK)
+    {
+        hdr->key_len = 0;
+        hdr->value_len = 0;
+    }
+
+    printf("before send\n");
+    //Send a message to a loadbalancer 
+    if(send(lb_fd, msg, sizeof(data_hdr_t) + hdr->key_len + hdr->value_len, 0) == -1)
+    {
+        perror("[LB] send to client error");
+        return -1;
+    }
+    printf("send to a loadbalancer\n");
+
     return 0;
 }
 
@@ -649,7 +728,16 @@ int updateKey(uint32_t hash_value, int status)
     printf("updateKey\n");
     int i, j, k;
     int i_, j_, value;
-    uint32_t worker_idx = hash_value % WORKER_NUM; if(status != PUT && status != DEL) { fprintf(stderr, "wrong status\n"); return -1; } pthread_mutex_lock(&shared_mutex); value = findKey(hash_value);
+    uint32_t worker_idx = hash_value % WORKER_NUM;
+    if(status != PUT && status != DEL) 
+    { 
+        fprintf(stderr, "wrong status\n");
+        return -1;
+    }
+
+    pthread_mutex_lock(&shared_mutex);
+    value = findKey(hash_value);
+    
     if(value != -1)
     {
         printf("findkey\n");
